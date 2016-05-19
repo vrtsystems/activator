@@ -30,6 +30,7 @@ changeResetTime = function (token,diff) {
 	code = jwt.sign(original,SIGNKEY,{algorithm:"HS256"});
 	return code;
 },
+acceptPassword=true,
 userModel = {
 	_find: function (login,cb) {
 		var found = null;
@@ -65,7 +66,7 @@ userModel = {
 		} else {
 			cb(404);
 		}
-	}
+	},
 }, 
 reset = function () {
 	users = _.cloneDeep(USERS);
@@ -206,7 +207,7 @@ before(function(){
   reset();
 });
 
-allTests = function (notifyOnNewPassword) {
+allTests = function (withGenerate, notifyOnNewPassword) {
 	beforeEach(reset);
   describe('activate', function(){
 		it('should send 500 for user property not added', function(done){
@@ -562,7 +563,11 @@ allTests = function (notifyOnNewPassword) {
 				],done);
 			});
 			it('should fail for known email with good code but missing new password', function(done){
+				if (withGenerate)
+					this.skip();
+
 				var email = users["1"].email, handler;
+
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
 					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
@@ -573,6 +578,9 @@ allTests = function (notifyOnNewPassword) {
 				],done);
 			});
 			it('should fail for known email with good code but missing new password with handler', function(done){
+				if (withGenerate)
+					this.skip();
+
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
@@ -712,6 +720,9 @@ allTests = function (notifyOnNewPassword) {
 				],done);
 			});
 			it('should fail for known email with good code but missing new password', function(done){
+				if (withGenerate)
+					this.skip();
+
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
@@ -723,6 +734,9 @@ allTests = function (notifyOnNewPassword) {
 				],done);
 			});
 			it('should fail for known email with good code but missing new password with handler', function(done){
+				if (withGenerate)
+					this.skip();
+
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
@@ -862,6 +876,9 @@ allTests = function (notifyOnNewPassword) {
 				],done);
 			});
 			it('should fail for known email with good code but missing new password', function(done){
+				if (withGenerate)
+					this.skip();
+
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
@@ -873,6 +890,9 @@ allTests = function (notifyOnNewPassword) {
 				],done);
 			});
 			it('should fail for known email with good code but missing new password with handler', function(done){
+				if (withGenerate)
+					this.skip();
+
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
@@ -1402,21 +1422,33 @@ describe('activator', function(){
 	describe('initialized', function(){
 		describe('with string transport', function(){
 			before(function(){
+			  userModel.generate = undefined;
 			  activator.init({user:userModel,transport:url,templates:templates,from:from,signkey:SIGNKEY});
 			});
-			allTests(false);
+			allTests(false, false);
 		});
 		describe('with nodemailer transport', function(){
 			before(function(){
+			  userModel.generate = undefined;
 			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
 			});
-			allTests(false);
+			allTests(false, false);
 		});
 		describe('with notifyOnNewPassword', function(){
 			before(function(){
+			  userModel.generate = undefined;
 			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY,notifyOnNewPassword:true});
 			});
-			allTests(true);
+			allTests(false, true);
+		});
+		describe('with generate', function(){
+			before(function(){
+			  userModel.generate = function(user, res) {
+			    return 'generated password';
+			  }
+			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
+			});
+			allTests(true, false);
 		});
 	});
 });

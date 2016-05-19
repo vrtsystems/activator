@@ -113,6 +113,9 @@ genHandler = function(email,path,data,cb) {
 		rcpt.should.eql(email);
 		// check for the correct Subject in the email
 		should.exist(content.data);
+		console.log('Received email ' + msgid
+				+ ': '
+				+ content.headers.subject);
 		content.headers.subject.should.eql(subject);
 		// do we have actual content to test? if so, we should ignore templates, because we do not have the request stuff
 		if (data.text) {
@@ -164,6 +167,33 @@ rHandler = function(email,data,cb) {
 	// set up the default subject
 	data.subject = data.subject || "Password Reset Email";
 	return genHandler(email,"/reset/my/password",data,cb);
+},
+pHandler = function(email,data,cb) {
+	if (!cb) {
+		cb = data;
+		data = {};
+	}
+	var re = new RegExp('^Password: (.*)$');
+	return function(rcpt,msgid,content) {
+		var err = null;
+		var res = null;
+		try {
+			rcpt.should.eql(email);
+			should.exist(content.data);
+			console.log('Received email ' + msgid
+					+ ': '
+					+ content.headers.subject);
+
+			content.headers.subject.should.eql("Account Password Changed");
+			should.exist(content.text);
+			var pwmatch = content.text.match(re);
+			pwmatch.length.should.eql(1);
+			res = pwmatch[0];
+		} catch(e) {
+			err = e;
+		}
+		cb(err, res);
+	};
 },
 createActivateHandler = function (req,res,next) {
 	// the header is not normally set, so we know we incurred the handler
@@ -322,7 +352,7 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {r.post('/users').expect(201,"2",cb);},
 					function (res,cb) {
 						email = users["2"].email;
-						handler = aHandler(email,cb);
+						handler = aHandler(email, cb);
 						mail.bind(email,handler);
 					},
 					function (res,cb) {
@@ -696,9 +726,7 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				async.waterfall([
 					function (cb) {
 						r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {
-						handler = rHandler(email,cb);
-						mail.bind(email,handler);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
 					function (res,cb) {
 						mail.unbind(email,handler);
 						r.put('/passwordreset/'+res.user).query({"Authorization":"asasqsqsas"}).type("json").send({password:"asasa"}).expect(400,cb);
@@ -710,9 +738,7 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				async.waterfall([
 					function (cb) {
 						r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {
-						handler = rHandler(email,cb);
-						mail.bind(email,handler);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
 					function (res,cb) {
 						mail.unbind(email,handler);
 						r.put('/passwordresetnext/'+res.user).query({Authorization:"asasqsqsqs"}).type("json").send({password:"asasa"}).expect('activator','completeResetHandler').expect(400,cb);
@@ -1237,28 +1263,26 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
 				function (res,cb) {
 					mail.unbind(email,handler);
-					mail.removeAll();
-					if (notifyOnNewPassword) {
-						handler = function(rcpt,msgid,content) {
-							rcpt.should.eql(email);
-							should.exist(content.data);
-							content.headers.subject.should.eql("Account Password Changed");
-							should.exist(content.text);
-							var re = new RegExp('^Password: (.*)$');
-							var pwmatch = content.text.match(re);
-							pwmatch.length.should.eql(1);
-							pwmatch[0].should.eql("abcdefgh");
-							/* All good */
-							cb(null, null);
-						};
-						mail.bind(email,handler);
+					if (mail && mail.removeAll) {
+						mail.removeAll();
 					}
 					r.put('/passwordreset/'+email).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
 				},
 				function (res,cb) {
-					if (notifyOnNewPassword)
+					if (notifyOnNewPassword) {
+						handler = pHandler(email, cb);
+						mail.bind(handler);
+					} else {
+						/* Pass through */
+						cb(null, res);
+					}
+				},
+				function (res,cb) {
+					if (notifyOnNewPassword) {
+						res.should.eql("abcdefgh");
 						mail.unbind(email,handler);
-					cb(null, res);
+					}
+					cb(null, null);
 				}
 			], done);
 		});

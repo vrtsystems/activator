@@ -206,7 +206,7 @@ before(function(){
   reset();
 });
 
-allTests = function () {
+allTests = function (notifyOnNewPassword) {
 	beforeEach(reset);
   describe('activate', function(){
 		it('should send 500 for user property not added', function(done){
@@ -1217,9 +1217,30 @@ allTests = function () {
 				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
 				function (res,cb) {
 					mail.unbind(email,handler);
+					mail.removeAll();
+					if (notifyOnNewPassword) {
+						handler = function(rcpt,msgid,content) {
+							rcpt.should.eql(email);
+							should.exist(content.data);
+							content.headers.subject.should.eql("Account Password Changed");
+							should.exist(content.text);
+							var re = new RegExp('^Password: (.*)$');
+							var pwmatch = content.text.match(re);
+							pwmatch.length.should.eql(1);
+							pwmatch[0].should.eql("abcdefgh");
+							/* All good */
+							cb(null, null);
+						};
+						mail.bind(email,handler);
+					}
 					r.put('/passwordreset/'+email).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
+				},
+				function (res,cb) {
+					if (notifyOnNewPassword)
+						mail.unbind(email,handler);
+					cb(null, res);
 				}
-			],done);
+			], done);
 		});
 	});
 	describe('with html emails', function(){
@@ -1383,13 +1404,19 @@ describe('activator', function(){
 			before(function(){
 			  activator.init({user:userModel,transport:url,templates:templates,from:from,signkey:SIGNKEY});
 			});
-			allTests();
+			allTests(false);
 		});
 		describe('with nodemailer transport', function(){
 			before(function(){
 			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
 			});
-			allTests();
+			allTests(false);
+		});
+		describe('with notifyOnNewPassword', function(){
+			before(function(){
+			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY,notifyOnNewPassword:true});
+			});
+			allTests(true);
 		});
 	});
 });

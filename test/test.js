@@ -5,7 +5,8 @@
 "use strict";
 var request = require('supertest'), should = require('should'), express = require('express'), bodyParser = require('body-parser'),
 app = express(), _ = require('lodash'), async = require('async'), smtp = require('smtp-tester'),
-r = request(app), mail, fs = require('fs'),
+r = request(app), mail, receivedMail = [], receivedMailListener = null,
+fs = require('fs'),
 activator = require('../lib/activator'), templates = __dirname+'/resources',
 mailer = require('nodemailer'), jwt = require('jsonwebtoken'), SIGNKEY = "1234567890abcdefghijklmn",
 USERS = {
@@ -68,8 +69,41 @@ userModel = {
 		}
 	},
 }, 
+setMailListener = function(cb) {
+	receivedMailListener = cb || null;
+	deliverMail();
+},
+deliverMail = function() {
+	if (receivedMailListener !== null) {
+		try {
+			while(receivedMail.length > 0) {
+				var msg = receivedMail.pop(0);
+				console.log('DEL: ' + msg.addr + ' : ' + msg.email.headers.subject);
+				receivedMailListener(msg.addr, msg.id, msg.email);
+			}
+		} catch(e) {
+			console.log('Exception hit: ' + e);
+			throw e;
+		}
+	}
+},
+receivedMailHandler = function(addr,id,email) {
+	var addrs = Object.keys(email.receivers);
+	console.log('Receivers: ' + addrs);
+	for (var idx = 0; idx < addrs.length; idx++) {
+		var addr = addrs[idx];
+		console.log('RECV: ' + addr + ' : ' + email.headers.subject);
+		receivedMail.push({
+			addr: addr, id: id, email: email
+		});
+	}
+	deliverMail();
+	mail.remove(id);
+},
 reset = function () {
 	users = _.cloneDeep(USERS);
+	while(receivedMail.length > 0)
+		receivedMail.pop(0);
 	if (mail && mail.removeAll) {
 		mail.removeAll();
 	}
@@ -113,9 +147,6 @@ genHandler = function(email,path,data,cb) {
 		rcpt.should.eql(email);
 		// check for the correct Subject in the email
 		should.exist(content.data);
-		console.log('Received email ' + msgid
-				+ ': '
-				+ content.headers.subject);
 		content.headers.subject.should.eql(subject);
 		// do we have actual content to test? if so, we should ignore templates, because we do not have the request stuff
 		if (data.text) {
@@ -174,15 +205,15 @@ pHandler = function(email,data,cb) {
 		data = {};
 	}
 	var re = new RegExp('^Password: (.*)$');
-	return function(rcpt,msgid,content) {
+	var h = function(rcpt,msgid,content) {
 		var err = null;
 		var res = null;
 		try {
-			rcpt.should.eql(email);
-			should.exist(content.data);
 			console.log('Received email ' + msgid
 					+ ': '
 					+ content.headers.subject);
+			rcpt.should.eql(email);
+			should.exist(content.data);
 
 			content.headers.subject.should.eql("Account Password Changed");
 			should.exist(content.text);
@@ -194,6 +225,7 @@ pHandler = function(email,data,cb) {
 		}
 		cb(err, res);
 	};
+	return h;
 },
 createActivateHandler = function (req,res,next) {
 	// the header is not normally set, so we know we incurred the handler
@@ -250,11 +282,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {r.post('/users').expect(201,"2",cb);},
 					function (res,cb) {
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+res.user+'/activate').set({'authorization':"Bearer asasqsqsqs"}).expect(400,'invalidcode',cb);
 					}
 				],done);
@@ -265,11 +296,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {r.post('/usersnext').expect('activator','createActivateHandler').expect(201,cb);},
 					function (res,cb) {
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/usersnext/'+res.user+'/activate').set({'authorization':"Bearer asasqsqsqs"}).expect('activator','completeActivateHandler').expect(400,cb);
 					}
 				],done);
@@ -282,11 +312,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("3");
 						email = users["3"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+"2"+'/activate').set({"authorization":"Bearer "+res.code}).expect(400,'invalidcode',cb);
 					}
 				],done);
@@ -299,11 +328,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("3");
 						email = users["3"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// check there is no attachment
 						should(res.content.attachments).undefined();
 						r.put('/usersnext/'+"2"+'/activate').set({"authorization":"Bearer "+res.code}).expect(400,'invalidcode',cb);
@@ -317,11 +345,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("2");
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+res.user+'/activate').set({"authorization":"Bearer "+res.code}).expect(200,cb);
 					}
 				],done);
@@ -333,11 +360,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("2");
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// check there is no attachment
 						should(res.content.attachments).undefined();
 						r.put('/usersnext/'+res.user+'/activate').set({"authorization":"Bearer "+res.code}).expect('activator','completeActivateHandler').expect(200,cb);
@@ -352,11 +378,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {r.post('/users').expect(201,"2",cb);},
 					function (res,cb) {
 						email = users["2"].email;
-						handler = aHandler(email, cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email, cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+res.user+'/activate').type("json").query({authorization:"asasqsqsqs"}).expect(400,'invalidcode',cb);
 					}
 				],done);
@@ -367,11 +392,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {r.post('/usersnext').expect('activator','createActivateHandler').expect(201,cb);},
 					function (res,cb) {
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/usersnext/'+res.user+'/activate').type("json").query({authorization:"asasqsqsqs"}).expect('activator','completeActivateHandler').expect(400,cb);
 					}
 				],done);
@@ -384,11 +408,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("3");
 						email = users["3"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+"2"+'/activate').type("json").query({authorization:res.code}).expect(400,'invalidcode',cb);
 					}
 				],done);
@@ -401,11 +424,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("3");
 						email = users["3"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// check there is no attachment
 						should(res.content.attachments).undefined();
 						r.put('/usersnext/'+"2"+'/activate').type("json").query({authorization:res.code}).expect(400,'invalidcode',cb);
@@ -419,11 +441,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("2");
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+res.user+'/activate').type("json").query({authorization:res.code}).expect(200,cb);
 					}
 				],done);
@@ -435,11 +456,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("2");
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// check there is no attachment
 						should(res.content.attachments).undefined();
 						r.put('/usersnext/'+res.user+'/activate').type("json").query({authorization:res.code}).expect('activator','completeActivateHandler').expect(200,cb);
@@ -454,11 +474,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {r.post('/users').expect(201,"2",cb);},
 					function (res,cb) {
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+res.user+'/activate').type("json").send({authorization:"asasqsqsqs"}).expect(400,'invalidcode',cb);
 					}
 				],done);
@@ -469,11 +488,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {r.post('/usersnext').expect('activator','createActivateHandler').expect(201,cb);},
 					function (res,cb) {
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/usersnext/'+res.user+'/activate').type("json").send({authorization:"asasqsqsqs"}).expect('activator','completeActivateHandler').expect(400,cb);
 					}
 				],done);
@@ -486,11 +504,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("3");
 						email = users["3"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+"2"+'/activate').type("json").send({authorization:res.code}).expect(400,'invalidcode',cb);
 					}
 				],done);
@@ -503,11 +520,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("3");
 						email = users["3"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// check there is no attachment
 						should(res.content.attachments).undefined();
 						r.put('/usersnext/'+"2"+'/activate').type("json").send({authorization:res.code}).expect(400,'invalidcode',cb);
@@ -521,11 +537,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("2");
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/users/'+res.user+'/activate').type("json").send({authorization:res.code}).expect(200,cb);
 					}
 				],done);
@@ -537,11 +552,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (res,cb) {
 						res.text.should.equal("2");
 						email = users["2"].email;
-						handler = aHandler(email,cb);
-						mail.bind(email,handler);
+						setMailListener(aHandler(email,cb));
 					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// check there is no attachment
 						should(res.content.attachments).undefined();
 						r.put('/usersnext/'+res.user+'/activate').type("json").send({authorization:res.code}).expect('activator','completeActivateHandler').expect(200,cb);
@@ -570,10 +584,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {
 						r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
 					function (res,cb) {
-						handler = rHandler(email,cb);
-						mail.bind(email,handler);},
+						setMailListener(rHandler(email,cb));
+					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer asasqsqsqs"}).type("json").send({password:"asasa"}).expect(400,cb);
 					}
 				],done);
@@ -584,10 +598,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {
 						r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
 					function (res,cb) {
-						handler = rHandler(email,cb);
-						mail.bind(email,handler);},
+						setMailListener(rHandler(email,cb));
+					},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).set({"Authorization":"Bearer asasqsqsqs"}).type("json").send({password:"asasa"}).expect('activator','completeResetHandler').expect(400,cb);
 					}
 				],done);
@@ -600,9 +614,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(rHandler(email,cb));
+					},
+					function (res,cb) {
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).type("json").set({Authorization:"Bearer "+res.code}).expect(400,cb);
 					}
 				],done);
@@ -614,9 +630,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(rHandler(email,cb));},
+					function (res,cb) {
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).type("json").set({Authorization:"Bearer "+res.code}).expect('activator','completeResetHandler').expect(400,cb);
 					}
 				],done);
@@ -625,9 +642,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// create a new code but signed with a different time
 						var code = changeResetTime(res.code,-100);
 						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+code}).type("json").send({password:"abcdefgh"}).expect(400,cb);
@@ -638,9 +655,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// create a new code but signed with a different time
 						var code = changeResetTime(res.code,-100);
 						r.put('/passwordresetnext/'+res.user).set({"Authorization":"Bearer "+code}).type("json").send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(400,cb);
@@ -651,10 +668,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
 						createUser({}, {}, function() {
-							mail.unbind(email,handler);
+							setMailListener(null);
 							r.put('/passwordreset/'+users["2"].id).set({"Authorization":"Bearer "+res.code}).type('json').send({password:"abcdefgh"}).expect(400,cb);
 						});
 					}
@@ -664,10 +681,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
 						createUser({}, {}, function() {
-							mail.unbind(email,handler);
+							setMailListener(null);
 							r.put('/passwordresetnext/'+users["2"].id).set({"Authorization":"Bearer "+res.code}).type('json').send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(400,cb);
 						});
 					}
@@ -677,9 +694,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcdefgh"}).expect(200,cb);
 					}
 				],done);
@@ -688,9 +705,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(200,cb);
 					}
 				],done);
@@ -699,9 +716,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// should have no attachments
 						should(res.content.attachments).undefined();
 						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcdefgh"}).expect(200,cb);
@@ -712,9 +729,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(200,cb);
 					}
 				],done);
@@ -726,9 +743,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				async.waterfall([
 					function (cb) {
 						r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).query({"Authorization":"asasqsqsas"}).type("json").send({password:"asasa"}).expect(400,cb);
 					}
 				],done);
@@ -738,9 +755,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				async.waterfall([
 					function (cb) {
 						r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).query({Authorization:"asasqsqsqs"}).type("json").send({password:"asasa"}).expect('activator','completeResetHandler').expect(400,cb);
 					}
 				],done);
@@ -752,9 +769,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).query({"Authorization":res.code}).type("json").send({}).expect(400,cb);
 					}
 				],done);
@@ -766,9 +783,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).query({"Authorization":res.code}).type("json").send({}).expect('activator','completeResetHandler').expect(400,cb);
 					}
 				],done);
@@ -777,9 +794,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// create a new code but signed with a different time
 						var code = changeResetTime(res.code,-100);
 						r.put('/passwordreset/'+res.user).query({Authorization:code}).type("json").send({password:"abcdefgh"}).expect(400,cb);
@@ -790,9 +807,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// create a new code but signed with a different time
 						var code = changeResetTime(res.code,-100);
 						r.put('/passwordresetnext/'+res.user).query({Authorization:code}).type("json").send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(400,cb);
@@ -803,10 +820,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
 						createUser({}, {}, function() {
-							mail.unbind(email,handler);
+							setMailListener(null);
 							r.put('/passwordreset/'+users["2"].id).query({Authorization:res.code}).type('json').send({password:"abcdefgh"}).expect(400,cb);
 						});
 					}
@@ -816,10 +833,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
 						createUser({}, {}, function() {
-							mail.unbind(email,handler);
+							setMailListener(null);
 							r.put('/passwordresetnext/'+users["2"].id).query({Authorization:res.code}).type('json').send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(400,cb);
 						});
 					}
@@ -829,9 +846,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).query({Authorization:res.code}).type("json").send({password:"abcdefgh"}).expect(200,cb);
 					}
 				],done);
@@ -840,9 +857,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).query({Authorization:res.code}).type("json").send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(200,cb);
 					}
 				],done);
@@ -851,9 +868,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// should have no attachments
 						should(res.content.attachments).undefined();
 						r.put('/passwordreset/'+res.user).query({Authorization:res.code}).type("json").send({password:"abcdefgh"}).expect(200,cb);
@@ -864,9 +881,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).query({Authorization:res.code}).type("json").send({password:"abcdefgh"}).expect('activator','completeResetHandler').expect(200,cb);
 					}
 				],done);
@@ -879,10 +896,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {
 						r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
 					function (res,cb) {
-						handler = rHandler(email,cb);
+						setMailListener(rHandler(email,cb));
 						mail.bind(email,handler);},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).type("json").send({Authorization:"asasqsqsqs",password:"asasa"}).expect(400,cb);
 					}
 				],done);
@@ -893,10 +910,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					function (cb) {
 						r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
 					function (res,cb) {
-						handler = rHandler(email,cb);
+						setMailListener(rHandler(email,cb));
 						mail.bind(email,handler);},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).type("json").send({Authorization:"asasqsqsqs",password:"asasa"}).expect('activator','completeResetHandler').expect(400,cb);
 					}
 				],done);
@@ -908,9 +925,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).type("json").send({Authorization:res.code}).expect(400,cb);
 					}
 				],done);
@@ -922,9 +939,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).type("json").send({Authorization:res.code}).expect('activator','completeResetHandler').expect(400,cb);
 					}
 				],done);
@@ -933,9 +950,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// create a new code but signed with a different time
 						var code = changeResetTime(res.code,-100);
 						r.put('/passwordreset/'+res.user).type("json").send({Authorization:code,password:"abcdefgh"}).expect(400,cb);
@@ -946,9 +963,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// create a new code but signed with a different time
 						var code = changeResetTime(res.code,-100);
 						r.put('/passwordresetnext/'+res.user).type("json").send({Authorization:code,password:"abcdefgh"}).expect('activator','completeResetHandler').expect(400,cb);
@@ -959,10 +976,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
 						createUser({}, {}, function() {
-							mail.unbind(email,handler);
+							setMailListener(null);
 							r.put('/passwordreset/'+users["2"].id).type('json').send({Authorization:res.code,password:"abcdefgh"}).expect(400,cb);
 						});
 					}
@@ -972,10 +989,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var user = users["1"], email = user.email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
 						createUser({}, {}, function() {
-							mail.unbind(email,handler);
+							setMailListener(null);
 							r.put('/passwordresetnext/'+users["2"].id).type('json').send({Authorization:res.code,password:"abcdefgh"}).expect('activator','completeResetHandler').expect(400,cb);
 						});
 					}
@@ -985,9 +1002,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:"1"}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordreset/'+res.user).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
 					}
 				],done);
@@ -996,9 +1013,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:"1"}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect('activator','completeResetHandler').expect(200,cb);
 					}
 				],done);
@@ -1007,9 +1024,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						// should have no attachments
 						should(res.content.attachments).undefined();
 						r.put('/passwordreset/'+res.user).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
@@ -1020,9 +1037,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				var email = users["1"].email, handler;
 				async.waterfall([
 					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {setMailListener(rHandler(email,cb));},
 					function (res,cb) {
-						mail.unbind(email,handler);
+						setMailListener(null);
 						r.put('/passwordresetnext/'+res.user).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect('activator','completeResetHandler').expect(200,cb);
 					}
 				],done);
@@ -1062,12 +1079,12 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,cb);
+					setMailListener(aHandler(email,cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
 					var att = res.content.attachments, exp = attachments.activate;
-					mail.unbind(email,handler);
+					setMailListener(null);
 					// check there is an attachment
 					should(att).be.ok();
 					// check the attachment matches
@@ -1084,10 +1101,10 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 			var email = users["1"].email, handler;
 			async.waterfall([
 				function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
-				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+				function (res,cb) {setMailListener(rHandler(email,cb));},
 				function (res,cb) {
 					var att = res.content.attachments, exp = attachments.passwordreset;
-					mail.unbind(email,handler);
+					setMailListener(null);
 					// check there is an attachment
 					should(att).be.ok();
 					// check the attachment matches
@@ -1115,11 +1132,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,cb);
+					setMailListener(aHandler(email,cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					res.content.html.match(/style="background: blue;"/)[0].should.be.ok();
 					cb();
 				}
@@ -1137,11 +1154,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,cb);
+					setMailListener(aHandler(email,cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/users/'+res.user+'/activate').type("json").send({Authorization:res.code}).expect(200,cb);
 				}
 			],done);
@@ -1150,9 +1167,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 			var email = users["1"].email, handler;
 			async.waterfall([
 				function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+				function (res,cb) {setMailListener(rHandler(email,cb));},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/passwordreset/'+res.user).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
 				}
 			],done);
@@ -1169,11 +1186,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,cb);
+					setMailListener(aHandler(email,cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/users/'+res.user+'/activate').type("json").send({Authorization:res.code}).expect(200,cb);
 				}
 			],done);
@@ -1189,9 +1206,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					activator.init({user:userModelEmail,emailProperty:"childObject.funny",transport:url,templates:templates,from:from,signkey:SIGNKEY});
 					r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);
 				},
-				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+				function (res,cb) {setMailListener(rHandler(email,cb));},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/passwordreset/'+res.user).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
 				}
 			],done);
@@ -1208,11 +1225,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,cb);
+					setMailListener(aHandler(email,cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/users/'+email+'/activate').type("json").send({Authorization:res.code}).expect(200,cb);
 				}
 			],done);
@@ -1221,9 +1238,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 			var email = users["1"].email, handler;
 			async.waterfall([
 				function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+				function (res,cb) {setMailListener(rHandler(email,cb));},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/passwordreset/'+email).type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
 				}
 			],done);
@@ -1240,11 +1257,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,cb);
+					setMailListener(aHandler(email,cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/users/'+email+'/activate').type("json").send({Authorization:res.code}).expect(200,cb);
 				}
 			],done);
@@ -1260,9 +1277,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 					activator.init({user:userModel,transport:url,templates:templates,id:'childObject.id',from:from,signkey:SIGNKEY});
 					r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);
 				},
-				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+				function (res,cb) {setMailListener(rHandler(email,cb));},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					if (mail && mail.removeAll) {
 						mail.removeAll();
 					}
@@ -1270,8 +1287,8 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				},
 				function (res,cb) {
 					if (notifyOnNewPassword) {
-						handler = pHandler(email, cb);
-						mail.bind(handler);
+						setMailListener(pHandler(email, cb));
+						mail.bind(email, handler);
 					} else {
 						/* Pass through */
 						cb(null, res);
@@ -1280,7 +1297,7 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					if (notifyOnNewPassword) {
 						res.should.eql("abcdefgh");
-						mail.unbind(email,handler);
+						setMailListener(null);
 					}
 					cb(null, null);
 				}
@@ -1305,11 +1322,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,{text:atemplate[2],html:htemplate[2]},cb);
+					setMailListener(aHandler(email,{text:atemplate[2],html:htemplate[2]},cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					cb();
 				}
 			],done);
@@ -1318,9 +1335,9 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 			var email = users["1"].email, handler;
 			async.waterfall([
 				function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
-				function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+				function (res,cb) {setMailListener(rHandler(email,cb));},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					r.put('/passwordreset/1').type("json").send({Authorization:res.code,password:"abcdefgh"}).expect(200,cb);
 				}
 			],done);
@@ -1356,11 +1373,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,{subject:parts.txt.en_GB[1],text:parts.txt.en_GB[2],html:parts.html.en_GB[2]},cb);
+					setMailListener(aHandler(email,{subject:parts.txt.en_GB[1],text:parts.txt.en_GB[2],html:parts.html.en_GB[2]},cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					cb();
 				}
 			],done);
@@ -1373,11 +1390,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,{subject:parts.txt.fr[1],text:parts.txt.fr[2],html:parts.html.fr[2]},cb);
+					setMailListener(aHandler(email,{subject:parts.txt.fr[1],text:parts.txt.fr[2],html:parts.html.fr[2]},cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					cb();
 				}
 			],done);
@@ -1390,11 +1407,11 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 				function (res,cb) {
 					res.text.should.equal("2");
 					email = users["2"].email;
-					handler = aHandler(email,{subject:parts.txt.fallback[1],text:parts.txt.fallback[2],html:parts.html.fallback[2]},cb);
+					setMailListener(aHandler(email,{subject:parts.txt.fallback[1],text:parts.txt.fallback[2],html:parts.html.fallback[2]},cb));
 					mail.bind(email,handler);
 				},
 				function (res,cb) {
-					mail.unbind(email,handler);
+					setMailListener(null);
 					cb();
 				}
 			],done);
@@ -1405,6 +1422,7 @@ allTests = function (withGenerate, notifyOnNewPassword) {
 describe('activator', function(){
 	before(function(){
 	  mail = smtp.init(MAILPORT,{disableDNSValidation:true,disableSTARTTLS:true});
+	  mail.bind(receivedMailHandler);
 		app.use(bodyParser.json());
 		app.use(setLang);
 		app.post('/usersbad',activator.createActivate);

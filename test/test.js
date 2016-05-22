@@ -143,6 +143,7 @@ genHandler = function(email,path,data,cb) {
 			ret.email.should.eql(email);
 		}
 		ret.content = content;
+		mail.remove(msgid);
 		cb(null,ret);
 	};
 },
@@ -1382,6 +1383,7 @@ describe('activator', function(){
 	describe('initialized', function(){
 		describe('with string transport', function(){
 			before(function(){
+			  userModel.check = undefined;
 			  userModel.generate = undefined;
 			  activator.init({user:userModel,transport:url,templates:templates,from:from,signkey:SIGNKEY});
 			});
@@ -1389,6 +1391,7 @@ describe('activator', function(){
 		});
 		describe('with nodemailer transport', function(){
 			before(function(){
+			  userModel.check = undefined;
 			  userModel.generate = undefined;
 			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
 			});
@@ -1396,6 +1399,7 @@ describe('activator', function(){
 		});
 		describe('with generate', function(){
 			before(function(){
+			  userModel.check = undefined;
 			  userModel.generate = function(user, res) {
 			    return 'generated password';
 			  }
@@ -1414,6 +1418,38 @@ describe('activator', function(){
 						users["1"].password.should.eql("generated password");
 						cb();
 					}
+				],done);
+			});
+		});
+		describe('with check', function(){
+			before(function(){
+			  reset();
+			  userModel.check = function(user, res, password) {
+			    return (password.length >= 8);
+			  }
+			  userModel.generate = undefined;
+			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
+			});
+			it('should reject password that fails policy', function(done){
+				var email = users["1"].email, handler;
+				async.waterfall([
+					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcd"}).expect(400,cb);
+					},
+				],done);
+			});
+			it('should accept password that meets policy', function(done){
+				var email = users["1"].email, handler;
+				async.waterfall([
+					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcdefgh"}).expect(200,cb);
+					},
 				],done);
 			});
 		});

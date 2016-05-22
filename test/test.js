@@ -165,6 +165,23 @@ rHandler = function(email,data,cb) {
 	data.subject = data.subject || "Password Reset Email";
 	return genHandler(email,"/reset/my/password",data,cb);
 },
+pHandler = function(email,cb) {
+	// set up the default subject
+	var passwordPattern = new RegExp('Password: (.*)');
+	return function(rcpt,msgid,content) {
+		rcpt.should.eql(email);
+		should.exist(content.data);
+		content.headers.subject.should.eql("Account Password Changed");
+		should.exist(content.text);
+
+		var match = content.text.match(passwordPattern);
+		match.length.should.eql(2);
+		var ret = match[1];
+
+		(typeof ret).should.eql('string');
+		cb(null, ret);
+	};
+},
 createActivateHandler = function (req,res,next) {
 	// the header is not normally set, so we know we incurred the handler
 	res.set("activator","createActivateHandler");
@@ -1450,6 +1467,35 @@ describe('activator', function(){
 						mail.unbind(email,handler);
 						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcdefgh"}).expect(200,cb);
 					},
+				],done);
+			});
+		});
+		describe('with notifyOnNewPassword', function(){
+			before(function(){
+			  reset();
+			  userModel.check = undefined;
+			  userModel.generate = undefined;
+			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY, notifyOnNewPassword: true});
+			});
+			it('should send new password by email', function(done){
+				var email = users["1"].email, handler;
+
+				/* Credit: http://codegolf.stackexchange.com/a/1515 */
+				var newPassword = Math.random().toString(36).substr(2);
+				async.waterfall([
+					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:newPassword}).expect(200,cb);
+					},
+					function (res,cb) {handler = pHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						users["1"].password.should.eql(newPassword);
+						users["1"].password.should.eql(res);
+						cb();
+					}
 				],done);
 			});
 		});

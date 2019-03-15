@@ -65,7 +65,7 @@ userModel = {
 		} else {
 			cb(404);
 		}
-	}
+	},
 }, 
 reset = function () {
 	users = _.cloneDeep(USERS);
@@ -143,6 +143,7 @@ genHandler = function(email,path,data,cb) {
 			ret.email.should.eql(email);
 		}
 		ret.content = content;
+		mail.remove(msgid);
 		cb(null,ret);
 	};
 },
@@ -163,6 +164,23 @@ rHandler = function(email,data,cb) {
 	// set up the default subject
 	data.subject = data.subject || "Password Reset Email";
 	return genHandler(email,"/reset/my/password",data,cb);
+},
+pHandler = function(email,cb) {
+	// set up the default subject
+	var passwordPattern = new RegExp('Password: (.*)');
+	return function(rcpt,msgid,content) {
+		rcpt.should.eql(email);
+		should.exist(content.data);
+		content.headers.subject.should.eql("Account Password Changed");
+		should.exist(content.text);
+
+		var match = content.text.match(passwordPattern);
+		match.length.should.eql(2);
+		var ret = match[1];
+
+		(typeof ret).should.eql('string');
+		cb(null, ret);
+	};
 },
 createActivateHandler = function (req,res,next) {
 	// the header is not normally set, so we know we incurred the handler
@@ -563,6 +581,7 @@ allTests = function () {
 			});
 			it('should fail for known email with good code but missing new password', function(done){
 				var email = users["1"].email, handler;
+
 				async.waterfall([
 					function (cb) {r.post('/passwordreset').type('json').send({user:email}).expect(201,cb);},
 					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
@@ -1381,15 +1400,104 @@ describe('activator', function(){
 	describe('initialized', function(){
 		describe('with string transport', function(){
 			before(function(){
+			  userModel.check = undefined;
+			  userModel.generate = undefined;
 			  activator.init({user:userModel,transport:url,templates:templates,from:from,signkey:SIGNKEY});
 			});
-			allTests();
+			allTests(false);
 		});
 		describe('with nodemailer transport', function(){
 			before(function(){
+			  userModel.check = undefined;
+			  userModel.generate = undefined;
 			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
 			});
-			allTests();
+			allTests(false);
+		});
+		describe('with generate', function(){
+			before(function(){
+			  userModel.check = undefined;
+			  userModel.generate = function(user, res) {
+			    return 'generated password';
+			  }
+			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
+			});
+			it('should ignore user password and use generated password', function(done){
+				var email = users["1"].email, handler;
+				async.waterfall([
+					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						r.put('/passwordresetnext/'+res.user).type("json").send({Authorization:res.code, password: 'abcdefgh'}).expect('activator','completeResetHandler').expect(200, cb);
+					},
+					function (res, cb) {
+						users["1"].password.should.eql("generated password");
+						cb();
+					}
+				],done);
+			});
+		});
+		describe('with check', function(){
+			before(function(){
+			  reset();
+			  userModel.check = function(user, res, password) {
+			    return (password.length >= 8);
+			  }
+			  userModel.generate = undefined;
+			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY});
+			});
+			it('should reject password that fails policy', function(done){
+				var email = users["1"].email, handler;
+				async.waterfall([
+					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcd"}).expect(400,cb);
+					},
+				],done);
+			});
+			it('should accept password that meets policy', function(done){
+				var email = users["1"].email, handler;
+				async.waterfall([
+					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:"abcdefgh"}).expect(200,cb);
+					},
+				],done);
+			});
+		});
+		describe('with notifyOnNewPassword', function(){
+			before(function(){
+			  reset();
+			  userModel.check = undefined;
+			  userModel.generate = undefined;
+			  activator.init({user:userModel,transport:mailer.createTransport(maileropts),templates:templates,from:from,signkey:SIGNKEY, notifyOnNewPassword: true});
+			});
+			it('should send new password by email', function(done){
+				var email = users["1"].email, handler;
+
+				/* Credit: http://codegolf.stackexchange.com/a/1515 */
+				var newPassword = Math.random().toString(36).substr(2);
+				async.waterfall([
+					function (cb) {r.post('/passwordresetnext').type('json').send({user:email}).expect('activator','createResetHandler').expect(201,cb);},
+					function (res,cb) {handler = rHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						r.put('/passwordreset/'+res.user).set({"Authorization":"Bearer "+res.code}).type("json").send({password:newPassword}).expect(200,cb);
+					},
+					function (res,cb) {handler = pHandler(email,cb); mail.bind(email,handler);},
+					function (res,cb) {
+						mail.unbind(email,handler);
+						users["1"].password.should.eql(newPassword);
+						users["1"].password.should.eql(res);
+						cb();
+					}
+				],done);
+			});
 		});
 	});
 });
